@@ -7,7 +7,16 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	url2 "net/url"
 	"os"
+	"strings"
+	"sync"
+	"time"
+)
+
+var (
+	exitChan = make(chan bool)
+	lock     sync.Mutex
 )
 
 type DictRequest struct {
@@ -49,7 +58,7 @@ type DictResponse struct {
 	} `json:"dictionary"`
 }
 
-func query(word string) {
+func queryCaiyun(word string) {
 	client := &http.Client{}
 	request := DictRequest{TransType: "en2zh", Source: word}
 	buf, err := json.Marshal(request)
@@ -96,10 +105,41 @@ func query(word string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// 已被翻译则直接返回
+	if !lock.TryLock() {
+		return
+	}
 	fmt.Println(word, "UK:", dictResponse.Dictionary.Prons.En, "US:", dictResponse.Dictionary.Prons.EnUs)
 	for _, item := range dictResponse.Dictionary.Explanations {
 		fmt.Println(item)
 	}
+	exitChan <- true
+}
+
+func queryGoogle(word string) {
+	url := fmt.Sprintf("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-cn&dt=t&q=%s", url2.QueryEscape(word))
+	res, err := http.Get(url)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer res.Body.Close()
+	bodyText, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	// 谷歌翻译真的很快 你可能需要取消注释下面这行来查看彩云的结果
+	//time.Sleep(1 * time.Second)
+	// 已被翻译则直接返回
+	if !lock.TryLock() {
+		return
+	}
+	split := strings.Split(string(bodyText), ",")
+	result := split[0][4 : len(split[0])-1]
+	fmt.Println(result)
+	exitChan <- true
+
 }
 
 func main() {
@@ -110,5 +150,13 @@ example: simpleDict hello
 		os.Exit(1)
 	}
 	word := os.Args[1]
-	query(word)
+	go queryCaiyun(word)
+	go queryGoogle(word)
+	// 超时退出或接受到可退出通知退出
+	select {
+	case <-time.After(time.Second * 5):
+		os.Exit(1)
+	case <-exitChan:
+		return
+	}
 }
